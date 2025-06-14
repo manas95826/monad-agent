@@ -10,37 +10,30 @@ contract CertificateAuthenticator {
         address issuer;
         bool isValid;
     }
-    
-    uint256 public nextCertificateId;
+
+    uint256 private nextCertificateId = 1;
     mapping(uint256 => Certificate) public certificates;
-    mapping(string => bool) public certificateHashExists;
+    mapping(string => uint256) public hashToCertificateId;
     mapping(address => uint256[]) private userCertificates;
-    
+
     event CertificateIssued(
-        uint256 certificateId,
+        uint256 indexed certificateId,
         address indexed issuer,
         string name,
         string certificateHash,
         uint256 timestamp
     );
-    
-    event CertificateRevoked(uint256 certificateId);
-    
-    constructor() {
-        nextCertificateId = 1;
-    }
-    
-    function issueCertificate(
-        string memory _name,
-        string memory _certificateHash
-    ) external {
+
+    event CertificateRevoked(uint256 indexed certificateId);
+
+    function issueCertificate(string memory _name, string memory _certificateHash) public {
         require(bytes(_name).length > 0, "Name cannot be empty");
         require(bytes(_certificateHash).length > 0, "Certificate hash cannot be empty");
-        require(!certificateHashExists[_certificateHash], "Certificate hash already exists");
-        
+        require(hashToCertificateId[_certificateHash] == 0, "Certificate hash already exists");
+
         uint256 certificateId = nextCertificateId++;
         
-        certificates[certificateId] = Certificate({
+        Certificate memory newCertificate = Certificate({
             id: certificateId,
             name: _name,
             certificateHash: _certificateHash,
@@ -48,34 +41,43 @@ contract CertificateAuthenticator {
             issuer: msg.sender,
             isValid: true
         });
-        
-        certificateHashExists[_certificateHash] = true;
+
+        certificates[certificateId] = newCertificate;
+        hashToCertificateId[_certificateHash] = certificateId;
         userCertificates[msg.sender].push(certificateId);
-        
-        emit CertificateIssued(certificateId, msg.sender, _name, _certificateHash, block.timestamp);
+
+        emit CertificateIssued(
+            certificateId,
+            msg.sender,
+            _name,
+            _certificateHash,
+            block.timestamp
+        );
     }
-    
-    function revokeCertificate(uint256 _certificateId) external {
+
+    function revokeCertificate(uint256 _certificateId) public {
+        require(_certificateId > 0 && _certificateId < nextCertificateId, "Invalid certificate ID");
         Certificate storage cert = certificates[_certificateId];
-        require(cert.id != 0, "Certificate does not exist");
-        require(msg.sender == cert.issuer, "Only issuer can revoke certificate");
+        require(cert.issuer == msg.sender, "Only issuer can revoke");
         require(cert.isValid, "Certificate already revoked");
         
         cert.isValid = false;
         emit CertificateRevoked(_certificateId);
     }
-    
-    function verifyCertificate(string memory _certificateHash) external view returns (bool) {
-        return certificateHashExists[_certificateHash];
+
+    function verifyCertificate(string memory _certificateHash) public view returns (bool) {
+        uint256 certificateId = hashToCertificateId[_certificateHash];
+        if (certificateId == 0) return false;
+        return certificates[certificateId].isValid;
     }
-    
-    function getCertificate(uint256 _certificateId) external view returns (Certificate memory) {
-        require(certificates[_certificateId].id != 0, "Certificate does not exist");
+
+    function getCertificate(uint256 _certificateId) public view returns (Certificate memory) {
+        require(_certificateId > 0 && _certificateId < nextCertificateId, "Invalid certificate ID");
         return certificates[_certificateId];
     }
-    
-    function getMyCertificates() external view returns (Certificate[] memory) {
-        uint256[] storage certIds = userCertificates[msg.sender];
+
+    function getMyCertificates() public view returns (Certificate[] memory) {
+        uint256[] memory certIds = userCertificates[msg.sender];
         Certificate[] memory result = new Certificate[](certIds.length);
         
         for (uint256 i = 0; i < certIds.length; i++) {
@@ -84,4 +86,4 @@ contract CertificateAuthenticator {
         
         return result;
     }
-} 
+}

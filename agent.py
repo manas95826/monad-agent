@@ -8,10 +8,13 @@ from empire_chain.agent.agent import Agent
 from dotenv import load_dotenv
 from app import TaskTracker
 from certificate_manager import CertificateManager
+from notice_manager import NoticeManager
 from web3 import Web3
 import logging
 import warnings
 import os
+from leave_management import LeaveManagement
+from payment_handler import handle_employee_payment as payment_handler
 
 # Suppress Web3 contract warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="web3.contract.base_contract")
@@ -108,6 +111,11 @@ def generate_and_verify_certificate(
         # Initialize certificate manager
         manager = CertificateManager()
         
+        # Check if contract is properly initialized
+        if not manager.contract.address:
+            logger.error("❌ Certificate contract not initialized")
+            return "Error: Certificate contract address not set. Please check your .env file"
+        
         # Generate and authenticate certificate
         generation_result = manager.generate_certificate(
             template_path=template_path,
@@ -121,6 +129,10 @@ def generate_and_verify_certificate(
         if generation_result['status'] != 'success':
             logger.error(f"❌ Certificate generation failed: {generation_result['message']}")
             return f"Error generating certificate: {generation_result['message']}"
+        
+        # Add a small delay to ensure the transaction is mined
+        import time
+        time.sleep(2)
         
         # Verify the generated certificate
         verification_result = manager.verify_certificate(output_path)
@@ -145,27 +157,183 @@ def generate_and_verify_certificate(
             f"Certificate Hash: {verification_result['certificate_hash']}\n"
         )
         
-        logger.info(response)
         return response
     
     except Exception as e:
         logger.error(f"❌ Unexpected error: {str(e)}")
         return f"Error in generate_and_verify_certificate: {str(e)}"
 
-def get_weather(location: str) -> str:
-    return f"The weather in {location} is sunny!"
+def create_notice(category: str, description: str, priority: int, content: str) -> str:
+    """Create a new notice using the NoticeManager contract."""
+    try:
+        if not os.getenv('CONTRACT_ADDRESS'):
+            return "Error: CONTRACT_ADDRESS not set in .env file. Please deploy the contract and set the address."
+            
+        logger.info(f"Creating notice with parameters:")
+        logger.info(f"Category: {category}")
+        logger.info(f"Description: {description}")
+        logger.info(f"Priority: {priority}")
+        logger.info(f"Content length: {len(content)} characters")
+        logger.info(f"Contract Address: {os.getenv('CONTRACT_ADDRESS')}")
+        
+        manager = NoticeManager()
+        result = manager.create_notice(category, description, priority, content)
+        
+        if result['status'] == 'success':
+            logger.info(f"Transaction successful: {result['tx_hash']}")
+            return f"Notice created successfully! Transaction: {result['tx_hash']}"
+        
+        logger.error(f"Transaction failed: {result.get('message', 'Unknown error')}")
+        return f"Error creating notice: {result.get('message', 'Unknown error')}"
+    except Exception as e:
+        logger.error(f"Exception in create_notice: {str(e)}")
+        return f"Error creating notice: {str(e)}"
 
-def calculate_distance(from_city: str, to_city: str) -> str:
-    return f"The distance from {from_city} to {to_city} is 500km"
+def manage_leave(
+    employee_address: str,
+    public_hash: str,
+    start_date: str,
+    end_date: str,
+    leave_type: str,
+    reason: str,
+    action: str = "request"
+) -> str:
+    """Manage employee leaves using the LeaveManagement contract.
+    
+    Args:
+        employee_address: Monad address of the employee (should start with '0x' and be 42 characters long)
+        public_hash: Public hash for verification
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        leave_type: Type of leave (Annual, Sick, Personal, Maternity/Paternity, Unpaid)
+        reason: Reason for leave
+        action: Action to perform (request, update, view)
+    
+    Returns:
+        str: Result of the leave management operation
+    """
+    try:
+        logger.info(f"\nManaging leave:")
+        logger.info(f"Employee: {employee_address}")
+        logger.info(f"Action: {action}")
+        
+        # Validate Monad address format
+        if not employee_address.startswith('0x') or len(employee_address) != 42:
+            logger.error(f"❌ Invalid Monad address format: {employee_address}")
+            return f"Error: Invalid Monad address format. Address should start with '0x' and be 42 characters long"
+        
+        # Initialize leave management
+        manager = LeaveManagement()
+        
+        if action == "request":
+            result = manager.request_leave(start_date, end_date, leave_type, reason)
+            if result['status'] == 'success':
+                logger.info(f"✅ Leave request submitted successfully!")
+                logger.info(f"Leave ID: {result['leave_id']}")
+                logger.info(f"Transaction: {result['tx_hash']}")
+                return f"Leave request submitted successfully! Leave ID: {result['leave_id']}, Transaction: {result['tx_hash']}"
+            logger.error(f"❌ Leave request failed: {result['message']}")
+            return f"Error requesting leave: {result['message']}"
+            
+        elif action == "view":
+            leaves = manager.get_my_leaves()
+            if not leaves:
+                return "No leave requests found."
+            
+            response = "Leave Requests:\n"
+            for leave in leaves:
+                response += f"\nID: {leave['id']}\n"
+                response += f"Start Date: {leave['start_date']}\n"
+                response += f"End Date: {leave['end_date']}\n"
+                response += f"Type: {leave['leave_type']}\n"
+                response += f"Status: {leave['status']}\n"
+                response += f"Reason: {leave['reason']}\n"
+                response += "-" * 40 + "\n"
+            
+            return response
+            
+        else:
+            return f"Error: Invalid action '{action}'. Supported actions are 'request' and 'view'"
+            
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {str(e)}")
+        return f"Error in manage_leave: {str(e)}"
 
-def get_time(timezone: str) -> str:
-    return f"Current time in {timezone}: {datetime.now()}"
-
-def translate_text(text: str, target_language: str) -> str:
-    return f"Translated '{text}' to {target_language}: [translation would go here]"
-
-def search_web(query: str, num_results: int) -> str:
-    return f"Top {num_results} results for '{query}': [search results would go here]"
+def process_employee_payment(
+    employee_name: str,
+    employee_address: str,
+    description: str,
+    amount: int,
+    process_payment: bool = False
+) -> str:
+    """Process employee payment using the payment handler.
+    
+    Args:
+        employee_name: Name of the employee
+        employee_address: Monad blockchain address of the employee
+        description: Description of the payment
+        amount: Amount in wei
+        process_payment: Whether to process the payment immediately
+    
+    Returns:
+        str: Result of the payment operation
+    """
+    try:
+        logger.info(f"\nProcessing employee payment:")
+        logger.info(f"Employee: {employee_name}")
+        logger.info(f"Address: {employee_address}")
+        logger.info(f"Description: {description}")
+        logger.info(f"Amount: {amount} wei")
+        logger.info(f"Process Payment: {process_payment}")
+        
+        # Validate Monad address format
+        if not employee_address.startswith('0x') or len(employee_address) != 42:
+            logger.error(f"❌ Invalid Monad address format: {employee_address}")
+            return f"Error: Invalid Monad address format. Address should start with '0x' and be 42 characters long"
+        
+        # Convert amount to integer if it's a string
+        try:
+            amount = int(amount)
+        except (ValueError, TypeError):
+            logger.error(f"❌ Invalid amount format: {amount}")
+            return f"Error: Amount must be a valid number"
+        
+        # Process the payment
+        result = payment_handler(
+            employee_name=employee_name,
+            employee_address=employee_address,
+            description=description,
+            amount=amount,
+            process_payment=process_payment
+        )
+        
+        if result['status'] == 'success':
+            response = (
+                f"✅ Payment Process Complete!\n\n"
+                f"Payment Details:\n"
+                f"---------------\n"
+                f"Payment ID: {result['payment_id']}\n"
+                f"Create Transaction: {result['create_tx_hash']}\n"
+                f"Block Number: {result['create_block']}\n"
+            )
+            
+            if process_payment:
+                response += (
+                    f"\nProcessing Details:\n"
+                    f"------------------\n"
+                    f"Process Transaction: {result['process_tx_hash']}\n"
+                    f"Process Block: {result['process_block']}\n"
+                )
+            
+            logger.info(response)
+            return response
+        
+        logger.error(f"❌ Payment processing failed: {result['message']}")
+        return f"Error processing payment: {result['message']}"
+        
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {str(e)}")
+        return f"Error in process_employee_payment: {str(e)}"
 
 def main():
     # Create agent
@@ -175,27 +343,29 @@ def main():
     functions = [
         create_task,
         generate_and_verify_certificate,
-        get_weather,
-        calculate_distance,
-        get_time,
-        translate_text,
-        search_web
+        create_notice,
+        manage_leave,
+        process_employee_payment
     ]
     
     for func in functions:
         agent.register_function(func)
     
-    # Example:         "Create a task 'Complete project documentation' with deadline '2025-07-31 23:59:59' for assignee '0x1234567890123456789012345678901234567890'",
+    # Example queries
     queries = [
-        "Generate and verify a certificate for 'Harshit Malik'"
+        "Generate a certificate for Sarah Johnson",
     ]
     
     # Process queries
     for query in queries:
         try:
-            logger.info(f"\nProcessing query: {query}")
             result = agent.process_query(query)
-            logger.info(f"Result: {result['result']}")
+            # Create a structured response with tool name and result
+            response = {
+                "tool_called": result.get('tool_name', 'unknown'),
+                "result": result['result']
+            }
+            print(response)  # Print the structured response
         except Exception as e:
             logger.error(f"❌ Error processing query: {str(e)}")
 
